@@ -1,0 +1,4 @@
+.manifold_bot_state.json
+.env
+__pycache__/
+*.pyc
