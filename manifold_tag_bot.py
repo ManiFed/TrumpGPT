@@ -22,7 +22,7 @@ MANIFOLD_USER_ID = os.getenv("MANIFOLD_USER_ID")
 MANIFOLD_CONTRACT_ID = os.getenv("MANIFOLD_CONTRACT_ID")
 MENTION_TAG = os.getenv("MENTION_TAG")
 MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 STATE_PATH = os.getenv("STATE_PATH", ".manifold_bot_state.json")
 COMMENT_LIMIT = int(os.getenv("COMMENT_LIMIT", "50"))
 
@@ -70,8 +70,6 @@ def fetch_recent_comments(limit: int) -> List[Dict[str, Any]]:
         query_params["contractId"] = MANIFOLD_CONTRACT_ID
     elif MANIFOLD_USER_ID:
         query_params["userId"] = MANIFOLD_USER_ID
-    else:
-        raise RuntimeError("Set MANIFOLD_CONTRACT_ID or MANIFOLD_USER_ID to fetch comments.")
     query = urllib.parse.urlencode(query_params)
     url = f"{MANIFOLD_BASE_URL}/comments?{query}"
     return _request_json("GET", url) or []
@@ -153,7 +151,9 @@ def main() -> None:
     while True:
         try:
             comments = fetch_recent_comments(COMMENT_LIMIT)
-            comments_sorted = sorted(comments, key=lambda c: c.get("createdTime", 0))
+            comments_sorted = sorted(
+                comments, key=lambda c: c.get("createdTime", 0), reverse=True
+            )
             for comment in comments_sorted:
                 comment_id = comment.get("id")
                 if not comment_id or comment_id in processed_ids:
