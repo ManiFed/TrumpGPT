@@ -63,7 +63,12 @@ def save_state(path: str, processed_ids: Iterable[str]) -> None:
 
 
 def fetch_recent_comments(limit: int) -> List[Dict[str, Any]]:
-    query = urllib.parse.urlencode({"limit": str(limit)})
+    query_params = {"limit": str(limit)}
+    if MANIFOLD_CONTRACT_ID:
+        query_params["contractId"] = MANIFOLD_CONTRACT_ID
+    elif MANIFOLD_USER_ID:
+        query_params["userId"] = MANIFOLD_USER_ID
+    query = urllib.parse.urlencode(query_params)
     url = f"{MANIFOLD_BASE_URL}/comments?{query}"
     return _request_json("GET", url) or []
 
