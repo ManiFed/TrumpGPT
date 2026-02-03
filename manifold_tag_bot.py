@@ -18,12 +18,12 @@ MANIFOLD_BASE_URL = os.getenv("MANIFOLD_BASE_URL", "https://api.manifold.markets
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 MANIFOLD_API_KEY = os.getenv("MANIFOLD_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MANIFOLD_USER_ID = os.getenv("MANIFOLD_USER_ID")
 MENTION_TAG = os.getenv("MENTION_TAG")
 MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 STATE_PATH = os.getenv("STATE_PATH", ".manifold_bot_state.json")
 COMMENT_LIMIT = int(os.getenv("COMMENT_LIMIT", "50"))
+MARKET_LIMIT = int(os.getenv("MARKET_LIMIT", "50"))
 
 
 def _request_json(
@@ -63,8 +63,14 @@ def save_state(path: str, processed_ids: Iterable[str]) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
 
 
-def fetch_recent_comments(limit: int) -> List[Dict[str, Any]]:
+def fetch_recent_markets(limit: int) -> List[Dict[str, Any]]:
     query = urllib.parse.urlencode({"limit": str(limit)})
+    url = f"{MANIFOLD_BASE_URL}/markets?{query}"
+    return _request_json("GET", url) or []
+
+
+def fetch_recent_comments(contract_id: str, limit: int) -> List[Dict[str, Any]]:
+    query = urllib.parse.urlencode({"limit": str(limit), "contractId": contract_id})
     url = f"{MANIFOLD_BASE_URL}/comments?{query}"
     return _request_json("GET", url) or []
 
@@ -132,8 +138,6 @@ def should_reply(comment: Dict[str, Any]) -> bool:
     text = comment.get("text") or ""
     if MENTION_TAG not in text:
         return False
-    if MANIFOLD_USER_ID and comment.get("userId") == MANIFOLD_USER_ID:
-        return False
     return True
 
 
@@ -144,8 +148,17 @@ def main() -> None:
 
     while True:
         try:
-            comments = fetch_recent_comments(COMMENT_LIMIT)
-            comments_sorted = sorted(comments, key=lambda c: c.get("createdTime", 0))
+            markets = fetch_recent_markets(MARKET_LIMIT)
+            markets_sorted = sorted(markets, key=lambda m: m.get("createdTime", 0), reverse=True)
+            comments: List[Dict[str, Any]] = []
+            for market in markets_sorted:
+                contract_id = market.get("id")
+                if not contract_id:
+                    continue
+                comments.extend(fetch_recent_comments(contract_id, COMMENT_LIMIT))
+            comments_sorted = sorted(
+                comments, key=lambda c: c.get("createdTime", 0), reverse=True
+            )
             for comment in comments_sorted:
                 comment_id = comment.get("id")
                 if not comment_id or comment_id in processed_ids:
