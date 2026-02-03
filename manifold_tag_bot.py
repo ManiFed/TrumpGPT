@@ -24,7 +24,6 @@ MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 STATE_PATH = os.getenv("STATE_PATH", ".manifold_bot_state.json")
 COMMENT_LIMIT = int(os.getenv("COMMENT_LIMIT", "50"))
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 MANIFOLD_CONTRACT_ID = os.getenv("MANIFOLD_CONTRACT_ID")
 MANIFOLD_USER_ID = os.getenv("MANIFOLD_USER_ID")
 WEBSOCKET_MAX_FAILURES = int(os.getenv("WEBSOCKET_MAX_FAILURES", "5"))
@@ -232,22 +231,12 @@ def main() -> None:
 
     for comment in iter_comments():
         try:
-            comments = fetch_recent_comments(COMMENT_LIMIT)
-            comments_sorted = sorted(
-                comments, key=lambda c: c.get("createdTime", 0), reverse=True
-            )
-            for comment in comments_sorted:
-                comment_id = comment.get("id")
-                if not comment_id or comment_id in processed_ids:
-                    continue
-                if not should_reply(comment):
-                    processed_ids.add(comment_id)
-                    continue
-                comment_text = comment.get("text", "")
-                logging.info("Replying to comment %s", comment_id)
-                reply = build_openrouter_reply(comment_text)
-                post_reply(comment, reply)
+            comment_id = comment.get("id")
+            if not comment_id or comment_id in processed_ids:
+                continue
+            if not should_reply(comment):
                 processed_ids.add(comment_id)
+                save_state(STATE_PATH, processed_ids)
                 continue
             comment_text = comment.get("text", "")
             logging.info("Replying to comment %s", comment_id)
