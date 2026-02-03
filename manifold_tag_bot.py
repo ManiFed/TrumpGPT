@@ -63,14 +63,13 @@ def save_state(path: str, processed_ids: Iterable[str]) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
 
 
-def fetch_recent_markets(limit: int) -> List[Dict[str, Any]]:
-    query = urllib.parse.urlencode({"limit": str(limit)})
-    url = f"{MANIFOLD_BASE_URL}/markets?{query}"
-    return _request_json("GET", url) or []
-
-
-def fetch_recent_comments(contract_id: str, limit: int) -> List[Dict[str, Any]]:
-    query = urllib.parse.urlencode({"limit": str(limit), "contractId": contract_id})
+def fetch_recent_comments(limit: int) -> List[Dict[str, Any]]:
+    query_params = {"limit": str(limit)}
+    if MANIFOLD_CONTRACT_ID:
+        query_params["contractId"] = MANIFOLD_CONTRACT_ID
+    elif MANIFOLD_USER_ID:
+        query_params["userId"] = MANIFOLD_USER_ID
+    query = urllib.parse.urlencode(query_params)
     url = f"{MANIFOLD_BASE_URL}/comments?{query}"
     return _request_json("GET", url) or []
 
@@ -148,14 +147,7 @@ def main() -> None:
 
     while True:
         try:
-            markets = fetch_recent_markets(MARKET_LIMIT)
-            markets_sorted = sorted(markets, key=lambda m: m.get("createdTime", 0), reverse=True)
-            comments: List[Dict[str, Any]] = []
-            for market in markets_sorted:
-                contract_id = market.get("id")
-                if not contract_id:
-                    continue
-                comments.extend(fetch_recent_comments(contract_id, COMMENT_LIMIT))
+            comments = fetch_recent_comments(COMMENT_LIMIT)
             comments_sorted = sorted(
                 comments, key=lambda c: c.get("createdTime", 0), reverse=True
             )
