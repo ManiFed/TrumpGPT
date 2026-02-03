@@ -23,6 +23,7 @@ MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 STATE_PATH = os.getenv("STATE_PATH", ".manifold_bot_state.json")
 COMMENT_LIMIT = int(os.getenv("COMMENT_LIMIT", "50"))
+MARKET_LIMIT = int(os.getenv("MARKET_LIMIT", "50"))
 
 
 def _request_json(
