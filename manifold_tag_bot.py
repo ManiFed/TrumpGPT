@@ -11,9 +11,8 @@ import logging
 import os
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, Optional, Set
 
 MANIFOLD_BASE_URL = os.getenv("MANIFOLD_BASE_URL", "https://api.manifold.markets/v0")
 MANIFOLD_WS_URL = os.getenv("MANIFOLD_WS_URL", "wss://api.manifold.markets/v0/ws")
@@ -22,7 +21,6 @@ MANIFOLD_API_KEY = os.getenv("MANIFOLD_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 MENTION_TAG = os.getenv("MENTION_TAG")
 MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 STATE_PATH = os.getenv("STATE_PATH", ".manifold_bot_state.json")
 COMMENT_LIMIT = int(os.getenv("COMMENT_LIMIT", "50"))
 MANIFOLD_CONTRACT_ID = os.getenv("MANIFOLD_CONTRACT_ID")
@@ -75,15 +73,47 @@ def save_state(path: str, processed_ids: Iterable[str]) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
 
 
-def fetch_recent_comments(limit: int) -> List[Dict[str, Any]]:
-    query_params = {"limit": str(limit)}
-    if MANIFOLD_CONTRACT_ID:
-        query_params["contractId"] = MANIFOLD_CONTRACT_ID
-    elif MANIFOLD_USER_ID:
-        query_params["userId"] = MANIFOLD_USER_ID
-    query = urllib.parse.urlencode(query_params)
-    url = f"{MANIFOLD_BASE_URL}/comments?{query}"
-    return _request_json("GET", url) or []
+def _ensure_websocket_available() -> None:
+    if websocket is None:
+        raise RuntimeError(
+            "websocket-client is required for the global/new-comments stream"
+        ) from _WEBSOCKET_IMPORT_ERROR
+
+
+def connect_comment_stream() -> "websocket.WebSocket":
+    _ensure_websocket_available()
+    ws = websocket.create_connection(MANIFOLD_WS_URL, timeout=30)
+    subscribe_payload = {"type": "subscribe", "channel": "global/new-comments"}
+    ws.send(json.dumps(subscribe_payload))
+    return ws
+
+
+def iter_new_comments() -> Iterable[Dict[str, Any]]:
+    _ensure_websocket_available()
+    backoff_seconds = 1
+    while True:
+        ws = None
+        try:
+            ws = connect_comment_stream()
+            logging.info("Subscribed to global/new-comments")
+            backoff_seconds = 1
+            while True:
+                raw = ws.recv()
+                if not raw:
+                    raise RuntimeError("Websocket closed without payload")
+                message = json.loads(raw)
+                if not isinstance(message, dict):
+                    continue
+                comment = message.get("comment") or message.get("data")
+                if isinstance(comment, dict):
+                    yield comment
+        except Exception as exc:  # noqa: BLE001 - reconnect loop
+            logging.warning("Websocket error: %s", exc)
+            time.sleep(backoff_seconds)
+            backoff_seconds = min(backoff_seconds * 2, 30)
+        finally:
+            if ws is not None:
+                ws.close()
 
 
 def _ensure_websocket_available() -> None:
