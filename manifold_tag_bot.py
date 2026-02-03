@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Manifold Markets tag-reply bot.
 
-Continuously polls Manifold comments, looks for @TrumpGPT mentions, and replies
-using OpenRouter's chat completion API.
+Subscribes to Manifold's new-comments websocket (falling back to polling if
+needed), looks for @TrumpGPT mentions, and replies using OpenRouter's chat
+completion API.
 """
 
 import json
@@ -10,11 +11,11 @@ import logging
 import os
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, Optional, Set
 
 MANIFOLD_BASE_URL = os.getenv("MANIFOLD_BASE_URL", "https://api.manifold.markets/v0")
+MANIFOLD_WS_URL = os.getenv("MANIFOLD_WS_URL", "wss://api.manifold.markets/v0/ws")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 MANIFOLD_API_KEY = os.getenv("MANIFOLD_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -23,6 +24,17 @@ MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 STATE_PATH = os.getenv("STATE_PATH", ".manifold_bot_state.json")
 COMMENT_LIMIT = int(os.getenv("COMMENT_LIMIT", "50"))
+MANIFOLD_CONTRACT_ID = os.getenv("MANIFOLD_CONTRACT_ID")
+MANIFOLD_USER_ID = os.getenv("MANIFOLD_USER_ID")
+WEBSOCKET_MAX_FAILURES = int(os.getenv("WEBSOCKET_MAX_FAILURES", "5"))
+
+try:
+    import websocket
+except ImportError as exc:  # pragma: no cover - surfaced at runtime
+    websocket = None
+    _WEBSOCKET_IMPORT_ERROR = exc
+else:
+    _WEBSOCKET_IMPORT_ERROR = None
 
 
 def _request_json(
@@ -62,10 +74,114 @@ def save_state(path: str, processed_ids: Iterable[str]) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
 
 
-def fetch_recent_comments(limit: int) -> List[Dict[str, Any]]:
-    query = urllib.parse.urlencode({"limit": str(limit)})
-    url = f"{MANIFOLD_BASE_URL}/comments?{query}"
-    return _request_json("GET", url) or []
+def _ensure_websocket_available() -> None:
+    if websocket is None:
+        raise RuntimeError(
+            "websocket-client is required for the global/new-comments stream"
+        ) from _WEBSOCKET_IMPORT_ERROR
+
+
+def connect_comment_stream() -> "websocket.WebSocket":
+    _ensure_websocket_available()
+    ws = websocket.create_connection(MANIFOLD_WS_URL, timeout=30)
+    subscribe_payload = {"type": "subscribe", "channel": "global/new-comments"}
+    ws.send(json.dumps(subscribe_payload))
+    return ws
+
+
+def iter_new_comments() -> Iterable[Dict[str, Any]]:
+    _ensure_websocket_available()
+    backoff_seconds = 1
+    while True:
+        ws = None
+        try:
+            ws = connect_comment_stream()
+            logging.info("Subscribed to global/new-comments")
+            backoff_seconds = 1
+            while True:
+                raw = ws.recv()
+                if not raw:
+                    raise RuntimeError("Websocket closed without payload")
+                message = json.loads(raw)
+                if not isinstance(message, dict):
+                    continue
+                comment = message.get("comment") or message.get("data")
+                if isinstance(comment, dict):
+                    yield comment
+        except Exception as exc:  # noqa: BLE001 - reconnect loop
+            logging.warning("Websocket error: %s", exc)
+            time.sleep(backoff_seconds)
+            backoff_seconds = min(backoff_seconds * 2, 30)
+        finally:
+            if ws is not None:
+                ws.close()
+
+
+def _ensure_websocket_available() -> None:
+    if websocket is None:
+        raise RuntimeError(
+            "websocket-client is required for the global/new-comments stream"
+        ) from _WEBSOCKET_IMPORT_ERROR
+
+
+def connect_comment_stream() -> "websocket.WebSocket":
+    _ensure_websocket_available()
+    ws = websocket.create_connection(MANIFOLD_WS_URL, timeout=30)
+    subscribe_payload = {"type": "subscribe", "channel": "global/new-comments"}
+    ws.send(json.dumps(subscribe_payload))
+    return ws
+
+
+def iter_new_comments() -> Iterable[Dict[str, Any]]:
+    _ensure_websocket_available()
+    backoff_seconds = 1
+    failure_count = 0
+    while True:
+        ws = None
+        try:
+            ws = connect_comment_stream()
+            logging.info("Subscribed to global/new-comments")
+            backoff_seconds = 1
+            failure_count = 0
+            while True:
+                raw = ws.recv()
+                if not raw:
+                    raise RuntimeError("Websocket closed without payload")
+                message = json.loads(raw)
+                if not isinstance(message, dict):
+                    continue
+                comment = message.get("comment") or message.get("data")
+                if isinstance(comment, dict):
+                    yield comment
+        except Exception as exc:  # noqa: BLE001 - reconnect loop
+            logging.warning("Websocket error: %s", exc)
+            failure_count += 1
+            if failure_count >= WEBSOCKET_MAX_FAILURES:
+                raise RuntimeError(
+                    "Websocket repeatedly failed; falling back to polling"
+                ) from exc
+            time.sleep(backoff_seconds)
+            backoff_seconds = min(backoff_seconds * 2, 30)
+        finally:
+            if ws is not None:
+                ws.close()
+
+
+def iter_comments() -> Iterable[Dict[str, Any]]:
+    try:
+        yield from iter_new_comments()
+        return
+    except RuntimeError as exc:
+        logging.warning("Falling back to polling comments: %s", exc)
+
+    while True:
+        comments = fetch_recent_comments(COMMENT_LIMIT)
+        comments_sorted = sorted(
+            comments, key=lambda c: c.get("createdTime", 0), reverse=True
+        )
+        for comment in comments_sorted:
+            yield comment
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def build_openrouter_reply(comment_text: str) -> str:
@@ -139,7 +255,7 @@ def main() -> None:
     processed_ids = load_state(STATE_PATH)
     logging.info("Loaded %d processed comment IDs", len(processed_ids))
 
-    while True:
+    for comment in iter_comments():
         try:
             comments = fetch_recent_comments(COMMENT_LIMIT)
             comments_sorted = sorted(
@@ -157,14 +273,17 @@ def main() -> None:
                 reply = build_openrouter_reply(comment_text)
                 post_reply(comment, reply)
                 processed_ids.add(comment_id)
-                save_state(STATE_PATH, processed_ids)
-            time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+            comment_text = comment.get("text", "")
+            logging.info("Replying to comment %s", comment_id)
+            reply = build_openrouter_reply(comment_text)
+            post_reply(comment, reply)
+            processed_ids.add(comment_id)
+            save_state(STATE_PATH, processed_ids)
         except urllib.error.HTTPError as exc:
             logging.error("HTTP error %s: %s", exc.code, exc.read().decode("utf-8"))
-            time.sleep(POLL_INTERVAL_SECONDS)
-        except Exception as exc:  # noqa: BLE001 - top-level loop
-            logging.exception("Unexpected error: %s", exc)
-            time.sleep(POLL_INTERVAL_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - keep listening
+            logging.exception("Unexpected error while handling comment: %s", exc)
 
 
 if __name__ == "__main__":
