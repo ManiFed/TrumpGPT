@@ -24,6 +24,7 @@ MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 STATE_PATH = os.getenv("STATE_PATH", ".manifold_bot_state.json")
 COMMENT_LIMIT = int(os.getenv("COMMENT_LIMIT", "50"))
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
 MANIFOLD_CONTRACT_ID = os.getenv("MANIFOLD_CONTRACT_ID")
 MANIFOLD_USER_ID = os.getenv("MANIFOLD_USER_ID")
 WEBSOCKET_MAX_FAILURES = int(os.getenv("WEBSOCKET_MAX_FAILURES", "5"))
@@ -72,49 +73,6 @@ def save_state(path: str, processed_ids: Iterable[str]) -> None:
     payload = {"processed_comment_ids": list(processed_ids)}
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
-
-
-def _ensure_websocket_available() -> None:
-    if websocket is None:
-        raise RuntimeError(
-            "websocket-client is required for the global/new-comments stream"
-        ) from _WEBSOCKET_IMPORT_ERROR
-
-
-def connect_comment_stream() -> "websocket.WebSocket":
-    _ensure_websocket_available()
-    ws = websocket.create_connection(MANIFOLD_WS_URL, timeout=30)
-    subscribe_payload = {"type": "subscribe", "channel": "global/new-comments"}
-    ws.send(json.dumps(subscribe_payload))
-    return ws
-
-
-def iter_new_comments() -> Iterable[Dict[str, Any]]:
-    _ensure_websocket_available()
-    backoff_seconds = 1
-    while True:
-        ws = None
-        try:
-            ws = connect_comment_stream()
-            logging.info("Subscribed to global/new-comments")
-            backoff_seconds = 1
-            while True:
-                raw = ws.recv()
-                if not raw:
-                    raise RuntimeError("Websocket closed without payload")
-                message = json.loads(raw)
-                if not isinstance(message, dict):
-                    continue
-                comment = message.get("comment") or message.get("data")
-                if isinstance(comment, dict):
-                    yield comment
-        except Exception as exc:  # noqa: BLE001 - reconnect loop
-            logging.warning("Websocket error: %s", exc)
-            time.sleep(backoff_seconds)
-            backoff_seconds = min(backoff_seconds * 2, 30)
-        finally:
-            if ws is not None:
-                ws.close()
 
 
 def _ensure_websocket_available() -> None:
@@ -184,6 +142,23 @@ def iter_comments() -> Iterable[Dict[str, Any]]:
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+def fetch_recent_comments(limit: int) -> Iterable[Dict[str, Any]]:
+    if not MANIFOLD_API_KEY:
+        raise RuntimeError("MANIFOLD_API_KEY is required for polling comments")
+    query_params = {"limit": str(limit)}
+    if MANIFOLD_CONTRACT_ID:
+        query_params["contractId"] = MANIFOLD_CONTRACT_ID
+    query_string = "&".join(f"{key}={value}" for key, value in query_params.items())
+    url = f"{MANIFOLD_BASE_URL}/comments?{query_string}"
+    headers = {"Authorization": f"Key {MANIFOLD_API_KEY}", "Accept": "application/json"}
+    response = _request_json("GET", url, headers=headers)
+    if not isinstance(response, list):
+        raise RuntimeError("Manifold comments response missing list payload")
+    if MANIFOLD_USER_ID:
+        return [comment for comment in response if comment.get("userId") != MANIFOLD_USER_ID]
+    return response
+
+
 def build_openrouter_reply(comment_text: str) -> str:
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is required")
@@ -245,7 +220,7 @@ def post_reply(comment: Dict[str, Any], reply_text: str) -> None:
 
 def should_reply(comment: Dict[str, Any]) -> bool:
     text = comment.get("text") or ""
-    if MENTION_TAG not in text:
+    if not MENTION_TAG or MENTION_TAG not in text:
         return False
     return True
 
