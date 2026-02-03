@@ -19,6 +19,7 @@ OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/ap
 MANIFOLD_API_KEY = os.getenv("MANIFOLD_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 MANIFOLD_USER_ID = os.getenv("MANIFOLD_USER_ID")
+MANIFOLD_CONTRACT_ID = os.getenv("MANIFOLD_CONTRACT_ID")
 MENTION_TAG = os.getenv("MENTION_TAG")
 MODEL_NAME = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
@@ -64,7 +65,14 @@ def save_state(path: str, processed_ids: Iterable[str]) -> None:
 
 
 def fetch_recent_comments(limit: int) -> List[Dict[str, Any]]:
-    query = urllib.parse.urlencode({"limit": str(limit)})
+    query_params = {"limit": str(limit)}
+    if MANIFOLD_CONTRACT_ID:
+        query_params["contractId"] = MANIFOLD_CONTRACT_ID
+    elif MANIFOLD_USER_ID:
+        query_params["userId"] = MANIFOLD_USER_ID
+    else:
+        raise RuntimeError("Set MANIFOLD_CONTRACT_ID or MANIFOLD_USER_ID to fetch comments.")
+    query = urllib.parse.urlencode(query_params)
     url = f"{MANIFOLD_BASE_URL}/comments?{query}"
     return _request_json("GET", url) or []
 
